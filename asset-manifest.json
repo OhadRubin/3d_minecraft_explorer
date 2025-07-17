@@ -1,16 +1,16 @@
 {
   "files": {
-    "main.css": "/3d_minecraft_explorer/static/css/main.5f1b30d6.css",
+    "main.css": "/3d_minecraft_explorer/static/css/main.67f37ff4.css",
     "main.js": "/3d_minecraft_explorer/static/js/main.9c2d0840.js",
     "static/js/453.f2342be2.chunk.js": "/3d_minecraft_explorer/static/js/453.f2342be2.chunk.js",
-    "static/media/logo.svg": "/3d_minecraft_explorer/static/media/logo.6ce24c58023cc2f8fd88fe9d219db6c6.svg",
     "index.html": "/3d_minecraft_explorer/index.html",
-    "main.5f1b30d6.css.map": "/3d_minecraft_explorer/static/css/main.5f1b30d6.css.map",
+    "static/media/logo.svg": "/3d_minecraft_explorer/static/media/logo.6ce24c58023cc2f8fd88fe9d219db6c6.svg",
+    "main.67f37ff4.css.map": "/3d_minecraft_explorer/static/css/main.67f37ff4.css.map",
     "main.9c2d0840.js.map": "/3d_minecraft_explorer/static/js/main.9c2d0840.js.map",
     "453.f2342be2.chunk.js.map": "/3d_minecraft_explorer/static/js/453.f2342be2.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.5f1b30d6.css",
+    "static/css/main.67f37ff4.css",
     "static/js/main.9c2d0840.js"
   ]
 }
