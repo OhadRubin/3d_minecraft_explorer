@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>3D Minecraft World Exploration Bot (Pure 3D Engine)</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        /* CSS is identical to file1, so it is omitted here for brevity */
+        body { margin: 0; padding: 0; background: #111; color: #fff; font-family: 'Courier New', monospace; overflow: hidden; overscroll-behavior: none; }
+        canvas { display: block; }
+        .ui-panel { position: absolute; z-index: 100; color: white; background: rgba(0, 0, 0, 0.75); padding: 15px; border-radius: 8px; font-size: 14px; border: 2px solid #555; max-width: 280px; }
+        h3 { margin-top: 0; border-bottom: 1px solid #555; padding-bottom: 5px; }
+        button { background: #4CAF50; color: white; border: 2px solid #45a049; padding: 8px 16px; margin: 10px 0 5px 0; cursor: pointer; border-radius: 4px; font-family: 'Courier New', monospace; font-weight: bold; width: 100%; }
+        button:hover { background: #45a049; border-color: #3d8b40; }
+        button:disabled { background: #555; border-color: #444; cursor: not-allowed; }
+        input[type="range"] { width: 100%; margin: 5px 0; }
+        #minecraft-ui { top: 20px; left: 20px; }
+        #bot-ui { top: 20px; right: 20px; }
+        #controls-info { bottom: 20px; left: 20px; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <!-- UI Elements are identical to file1, so they are omitted here for brevity -->
+    <div id="minecraft-ui" class="ui-panel">
+        <h3>🌍 World Generator</h3>
+        <div><label>Chunk Size: <span id="sizeLabel">128</span></label><br><input type="range" id="sizeSlider" min="32" max="512" step="16" value="128"></div>
+        <div><label>Height Scale: <span id="heightLabel">50</span></label><br><input type="range" id="heightSlider" min="10" max="50" step="2" value="50"></div>
+        <div><label>Noise Scale: <span id="scaleLabel">0.08</span></label><br><input type="range" id="scaleSlider" min="0.01" max="0.1" step="0.005" value="0.08"></div>
+        <div><label>Sea Level: <span id="seaLabel">-10</span></label><br><input type="range" id="seaSlider" min="-10" max="15" step="1" value="-10"></div>
+        <button id="generateButton">Generate New World</button>
+    </div>
+    <div id="bot-ui" class="ui-panel">
+        <h3>🤖 3D Bot Controller</h3>
+        <div id="stats">Status: Ready<br>Coverage: 0.0%<br>Iterations: 0</div><hr>
+        <div><label>3D Sensor Range: <span id="sensorLabel">15</span></label><br><input type="range" id="sensorSlider" min="5" max="25" step="1" value="15"></div>
+        <div><label>Coverage Target: <span id="coverageLabel">98</span>%</label><br><input type="range" id="coverageSlider" min="80" max="100" step="1" value="98"></div>
+        <div><label><input type="checkbox" id="firstPersonCheckbox"> First Person View</label></div>
+        <button id="startButton">Start 3D Exploration</button>
+        <button id="stopButton">Stop Exploration</button>
+    </div>
+    <div id="controls-info" class="ui-panel">
+        <strong>🎮 Controls:</strong><br>(RMB) Pan<br>(Scroll) Zoom<br><br><strong>📹 Views:</strong><br>Toggle First Person to follow bot
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/",
+                "bot-logic": "./exploration-algorithms/bot-logic.js",
+                "simulation-harness": "./exploration-algorithms/simulation-harness.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        // Import from the separate bot-logic and simulation-harness files
+        import { C } from 'bot-logic';
+        import { runLegacyExploration } from 'simulation-harness';
+
+        // ====================================================================================
+        // ALGORITHMIC CORE IS NOW IMPORTED FROM 'bot-logic' AND 'simulation-harness'
+        // ====================================================================================
+
+
+        // ====================================================================================
+        // MINECRAFT TERRAIN CORE (From Terrain Generator)
+        // ====================================================================================
+        const BlockType = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, WATER: 4, SAND: 5, SNOW: 6, WOOD: 7, LEAVES: 8 };
+        
+        function noise(x, y, scale) {
+            let value = 0, amplitude = 1, frequency = 1, maxValue = 0;
+            for (let i = 0; i < 4; i++) {
+                value += Math.sin(x * frequency * scale) * Math.cos(y * frequency * scale) * amplitude;
+                value += Math.sin((x + 1000) * frequency * scale * 1.3) * Math.cos((y + 1000) * frequency * scale * 0.7) * amplitude * 0.5;
+                maxValue += amplitude; amplitude *= 0.5; frequency *= 2;
+            }
+            return value / maxValue;
+        }
+
+        // ====================================================================================
+        // MAIN APPLICATION CLASS (Combined Logic)
+        // This class uses the imported bot-logic and simulation-harness functions.
+        // ====================================================================================
+        class MinecraftExplorerApp {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.controls = null;
+                
+                this.terrainGroup = new THREE.Group();
+                this.blockMaterials = {};
+                this.regionInstances = {};
+                this.blockMap = new Map();
+                this.regionCounts = {};
+                this.lastKnownMap3D = null;
+                this.start3D = null; // 3D starting position
+                this.walkabilityCache = null; // Pre-computed 3D walkability cache
+                
+                this.robotMesh = null;
+                this.trailLine = null;
+                this.pathLine = null;
+                this.frontierMesh = null;
+                this.targetMarker = null;
+
+                this.simParams = {
+                    chunkSize: 128,
+                    heightScale: 50,
+                    noiseScale: 0.08,
+                    seaLevel: -10,
+                    sensorRange: 15,
+                    explorationThreshold: 98,
+                };
+                this.isRunning = false;
+                this.shouldCancel = false;
+                this.isFirstPerson = false;
+                this.overheadCameraPos = null;
+            }
+
+            async run() {
+                this.setupDOM();
+                this.setupScene();
+                this.createBlockMaterials();
+                this.createBlockInstances();
+                this.initBotVisuals();
+                this.setupUI();
+                await this.generateAndInitWorld();
+                this.animate = this.animate.bind(this);
+                this.animate();
+            }
+
+            // --- SETUP, UI, and World Generation methods are identical to file1 ---
+            // --- We only need to show the parts that changed their logic ---
+            
+            // Pure 3D exploration using only 3D functions from simulation-harness.js
+            async startExploration() {
+                if (this.isRunning || !this.start3D) return;
+                
+                this.isRunning = true;
+                this.shouldCancel = false;
+                document.getElementById('startButton').disabled = true;
+                document.getElementById('stopButton').disabled = false;
+                document.getElementById('generateButton').disabled = true;
+
+
+                // Use pure 3D world interface from exploration-algorithms.js
+                const size=this.simParams.chunkSize;
+                const world3D={
+                    isWalkable: (x, y, z) => {
+                        return this.walkabilityCache.has(`${x},${y},${z}`);
+                    }
+                };
+
+                const regionBounds={
+                    minX: -Math.floor(size/2),
+                    maxX: Math.floor(size/2),
+                    minY: 0,
+                    maxY: this.simParams.heightScale+10,
+                    minZ: -Math.floor(size/2),
+                    maxZ: Math.floor(size/2)
+                };
+
+                const input3D={
+                    world3D: world3D,
+                    start: this.start3D,
+                    regionBounds: regionBounds
+                };
+
+                // Use the refactored exploration system from simulation-harness
+                await runLegacyExploration(
+                    input3D,
+                    {
+                        sRange: this.simParams.sensorRange,
+                        stepSize: 1.0,
+                        expThresh: this.simParams.explorationThreshold,
+                        delay: 10,
+                    },
+                    (progress) => {
+                        if (this.shouldCancel) throw new Error('Exploration cancelled');
+                        return this.updateExplorationVisuals(progress);
+                    }
+                );
+                this.updateStats("Exploration complete!", this.lastCoverage, this.lastIter);
+
+
+                this.isRunning = false;
+                document.getElementById('startButton').disabled = false;
+                document.getElementById('stopButton').disabled = true;
+                document.getElementById('generateButton').disabled = false;
+            }
+
+            // All visualization methods updated to work with 3D exploration-algorithms.js functions
+            setupDOM() {
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                document.body.appendChild(this.renderer.domElement);
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth / window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+            setupScene() {
+                this.scene.background = new THREE.Color(0x87CEEB); this.scene.fog = new THREE.Fog(0x87CEEB, 100, 300); this.scene.add(this.terrainGroup);
+                const chunkSize = this.simParams.chunkSize;
+                this.camera.position.set(0, chunkSize, chunkSize/2); this.camera.lookAt(0, 0, 0);
+                this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableRotate = false; this.controls.enablePan = true; this.controls.enableZoom = true; this.controls.target.set(0, 0, 0); this.controls.update();
+                this.overheadCameraPos = { position: this.camera.position.clone(), target: this.controls.target.clone() };
+                const ambientLight = new THREE.AmbientLight(0x606060); this.scene.add(ambientLight);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0); directionalLight.position.set(100, 100, 50); this.scene.add(directionalLight);
+            }
+            createBlockMaterials() {
+                const materials = {
+                    [BlockType.GRASS]: new THREE.MeshLambertMaterial({ color: 0x4a7c3a }), [BlockType.DIRT]: new THREE.MeshLambertMaterial({ color: 0x8b4513 }), [BlockType.STONE]: new THREE.MeshLambertMaterial({ color: 0x808080 }),
+                    [BlockType.WATER]: new THREE.MeshLambertMaterial({ color: 0x4169e1, transparent: true, opacity: 0.7 }), [BlockType.SAND]: new THREE.MeshLambertMaterial({ color: 0xc2b280 }),
+                    [BlockType.SNOW]: new THREE.MeshLambertMaterial({ color: 0xffffff }), [BlockType.WOOD]: new THREE.MeshLambertMaterial({ color: 0x8b4513 }), [BlockType.LEAVES]: new THREE.MeshLambertMaterial({ color: 0x228b22, transparent: true, opacity: 0.9 }),
+                };
+                for(const [type, mat] of Object.entries(materials)) { this.blockMaterials[type] = { original: mat, unknown: new THREE.MeshLambertMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.6 }) }; }
+            }
+            createBlockInstances() {
+                const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const { chunkSize, heightScale } = this.simParams; const regionSize = 16; const regionsPerSide = Math.ceil(chunkSize / regionSize); const maxInstancesPerRegion = regionSize * regionSize * heightScale;
+                for (let regionRow = 0; regionRow < regionsPerSide; regionRow++) {
+                    for (let regionCol = 0; regionCol < regionsPerSide; regionCol++) {
+                        const regionKey = `${regionRow},${regionCol}`; this.regionInstances[regionKey] = {}; this.regionCounts[regionKey] = {};
+                        for (const [blockType, materials] of Object.entries(this.blockMaterials)) {
+                            const originalKey = `${blockType}_original`; this.regionInstances[regionKey][originalKey] = new THREE.InstancedMesh(boxGeometry, materials.original, maxInstancesPerRegion);
+                            this.regionInstances[regionKey][originalKey].count = 0; this.regionInstances[regionKey][originalKey].instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.terrainGroup.add(this.regionInstances[regionKey][originalKey]);
+                            const unknownKey = `${blockType}_unknown`; this.regionInstances[regionKey][unknownKey] = new THREE.InstancedMesh(boxGeometry, materials.unknown, maxInstancesPerRegion);
+                            this.regionInstances[regionKey][unknownKey].count = 0; this.regionInstances[regionKey][unknownKey].instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.terrainGroup.add(this.regionInstances[regionKey][unknownKey]);
+                            this.regionCounts[regionKey][originalKey] = 0; this.regionCounts[regionKey][unknownKey] = 0;
+                        }
+                    }
+                }
+            }
+            resetInstancedMeshes() {
+                for (const regionKey of Object.keys(this.regionCounts)) { for (const materialKey of Object.keys(this.regionCounts[regionKey])) { this.regionCounts[regionKey][materialKey] = 0; } }
+                for (const regionInstances of Object.values(this.regionInstances)) { for (const instanceMesh of Object.values(regionInstances)) { instanceMesh.count = 0; } }
+            }
+            initBotVisuals() {
+                const robotBodyGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.2, 16); const robotDirGeo = new THREE.ConeGeometry(0.3, 0.5, 16);
+                const robotBodyMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 0.5, roughness: 0.5 }); const robotDirMat = new THREE.MeshStandardMaterial({ color: 0xff3333 });
+                const body = new THREE.Mesh(robotBodyGeo, robotBodyMat); body.rotation.x = Math.PI / 2;
+                const dir = new THREE.Mesh(robotDirGeo, robotDirMat); dir.position.z = -0.35;
+                this.robotMesh = new THREE.Group(); this.robotMesh.add(body); this.robotMesh.add(dir); this.scene.add(this.robotMesh);
+                this.trailLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x00aaff, linewidth: 3 }));
+                this.pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 4 }));
+                this.scene.add(this.trailLine, this.pathLine);
+                const frontierGeo = new THREE.SphereGeometry(0.4, 16, 16); const frontierMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+                this.frontierMesh = new THREE.InstancedMesh(frontierGeo, frontierMat, 2048); this.frontierMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.scene.add(this.frontierMesh);
+                const targetGeo = new THREE.TorusGeometry(0.5, 0.1, 8, 16); const targetMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+                this.targetMarker = new THREE.Mesh(targetGeo, targetMat); this.targetMarker.rotation.x = Math.PI / 2; this.scene.add(this.targetMarker);
+                this.resetBotVisuals();
+            }
+            resetBotVisuals() { this.trailLine.geometry.setFromPoints([]); this.pathLine.visible = false; this.frontierMesh.count = 0; this.targetMarker.visible = false; this.robotMesh.visible = false; }
+            setupUI() {
+                const UIElements = { size: { slider: 'sizeSlider', label: 'sizeLabel' }, height: { slider: 'heightSlider', label: 'heightLabel' }, noise: { slider: 'scaleSlider', label: 'scaleLabel' }, sea: { slider: 'seaSlider', label: 'seaLabel' }, sensor: { slider: 'sensorSlider', label: 'sensorLabel' }, coverage: { slider: 'coverageSlider', label: 'coverageLabel' } };
+                document.getElementById(UIElements.size.slider).addEventListener('input', e => { this.simParams.chunkSize = parseInt(e.target.value); document.getElementById(UIElements.size.label).textContent = e.target.value; });
+                document.getElementById(UIElements.height.slider).addEventListener('input', e => { this.simParams.heightScale = parseInt(e.target.value); document.getElementById(UIElements.height.label).textContent = e.target.value; });
+                document.getElementById(UIElements.noise.slider).addEventListener('input', e => { this.simParams.noiseScale = parseFloat(e.target.value); document.getElementById(UIElements.noise.label).textContent = e.target.value; });
+                document.getElementById(UIElements.sea.slider).addEventListener('input', e => { this.simParams.seaLevel = parseInt(e.target.value); document.getElementById(UIElements.sea.label).textContent = e.target.value; });
+                document.getElementById(UIElements.sensor.slider).addEventListener('input', e => { this.simParams.sensorRange = parseInt(e.target.value); document.getElementById(UIElements.sensor.label).textContent = e.target.value; });
+                document.getElementById(UIElements.coverage.slider).addEventListener('input', e => { this.simParams.explorationThreshold = parseInt(e.target.value); document.getElementById(UIElements.coverage.label).textContent = e.target.value; });
+                document.getElementById('generateButton').onclick = () => this.generateAndInitWorld(); document.getElementById('startButton').onclick = () => this.startExploration(); document.getElementById('stopButton').onclick = () => this.stopExploration();
+                document.getElementById('firstPersonCheckbox').addEventListener('change', e => { this.toggleFirstPerson(e.target.checked); });
+                document.getElementById('stopButton').disabled = true; document.getElementById('startButton').disabled = true;
+            }
+            toggleFirstPerson(enabled) {
+                this.isFirstPerson = enabled;
+                if (enabled) {
+                    this.overheadCameraPos = { position: this.camera.position.clone(), target: this.controls.target.clone() };
+                    this.controls.enabled = false; if (this.robotMesh) { this.robotMesh.visible = false; }
+                    if (this.robotMesh) { this.setCameraToRobotView(); }
+                } else {
+                    if (this.overheadCameraPos) { this.camera.position.copy(this.overheadCameraPos.position); this.controls.target.copy(this.overheadCameraPos.target); this.controls.update(); }
+                    this.controls.enabled = true; if (this.robotMesh) { this.robotMesh.visible = true; }
+                }
+            }
+            setCameraToRobotView() {
+                if (!this.robotMesh || !this.isFirstPerson) return;
+                const robotPos = this.robotMesh.position; const robotRot = this.robotMesh.rotation.y;
+                this.camera.position.set(robotPos.x, robotPos.y + 1.0, robotPos.z);
+                
+                // 3D terrain-aware camera look direction
+                let elevationAhead = robotPos.y; const lookDistance = 3;
+                const aheadX = robotPos.x + Math.sin(robotRot) * lookDistance; 
+                const aheadZ = robotPos.z + (-Math.cos(robotRot)) * lookDistance;
+                
+                // Check walkability cache for elevation ahead
+                let bestElevation = robotPos.y;
+                for (let y = 0; y <= this.simParams.heightScale + 10; y++) {
+                    const algX = Math.round(aheadX);
+                    const algZ = Math.round(aheadZ);
+                    if (this.walkabilityCache.has(`${algX},${y},${algZ}`)) {
+                        bestElevation = y;
+                        break;
+                    }
+                }
+                
+                const elevationDiff = bestElevation - robotPos.y;
+                const slopeAngle = Math.atan2(elevationDiff, lookDistance);
+                const baseDownwardAngle = -0.2; const adjustedYLook = Math.sin(slopeAngle) + baseDownwardAngle;
+                const lookDirection = new THREE.Vector3(Math.sin(robotRot), adjustedYLook, -Math.cos(robotRot));
+                const lookAt = new THREE.Vector3().addVectors(this.camera.position, lookDirection);
+                this.camera.lookAt(lookAt);
+            }
+            async generateAndInitWorld() {
+                if(this.isRunning) this.stopExploration(); this.updateStats("Generating 3D world...", 0, 0); await new Promise(r => setTimeout(r, 20));
+                this.resetInstancedMeshes(); this.blockMap.clear(); this.lastKnownMap3D = null; this.walkabilityCache = null; this.start3D = null; this.resetBotVisuals();
+                const { chunkSize, heightScale, noiseScale, seaLevel } = this.simParams;
+                const heightMap = this.generateHeightMap(chunkSize, heightScale, noiseScale);
+                const matrix = new THREE.Matrix4(); const regionSize = 16;
+                for (let z = 0; z < chunkSize; z++) {
+                    for (let x = 0; x < chunkSize; x++) {
+                        const surfaceHeight = heightMap[z][x];
+                        for (let y = 0; y <= Math.max(surfaceHeight, seaLevel); y++) {
+                            const blockType = this.getBlockType(y, surfaceHeight, seaLevel, heightScale);
+                            if (blockType !== BlockType.AIR) {
+                                const regionRow = Math.floor(z / regionSize); const regionCol = Math.floor(x / regionSize); const regionKey = `${regionRow},${regionCol}`;
+                                // Create region if it doesn't exist (handles chunkSize changes)
+                                if (!this.regionCounts[regionKey]) {
+                                    this.regionInstances[regionKey] = {}; this.regionCounts[regionKey] = {};
+                                    const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+                                    const maxInstancesPerRegion = regionSize * regionSize * heightScale;
+                                    for (const [blockType2, materials] of Object.entries(this.blockMaterials)) {
+                                        const originalKey = `${blockType2}_original`; this.regionInstances[regionKey][originalKey] = new THREE.InstancedMesh(boxGeometry, materials.original, maxInstancesPerRegion);
+                                        this.regionInstances[regionKey][originalKey].count = 0; this.regionInstances[regionKey][originalKey].instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.terrainGroup.add(this.regionInstances[regionKey][originalKey]);
+                                        const unknownKey = `${blockType2}_unknown`; this.regionInstances[regionKey][unknownKey] = new THREE.InstancedMesh(boxGeometry, materials.unknown, maxInstancesPerRegion);
+                                        this.regionInstances[regionKey][unknownKey].count = 0; this.regionInstances[regionKey][unknownKey].instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.terrainGroup.add(this.regionInstances[regionKey][unknownKey]);
+                                        this.regionCounts[regionKey][originalKey] = 0; this.regionCounts[regionKey][unknownKey] = 0;
+                                    }
+                                }
+                                matrix.makeTranslation(x - chunkSize / 2, y, z - chunkSize / 2);
+                                const materialKey = `${blockType}_unknown`; const instanceIndex = this.regionCounts[regionKey][materialKey];
+                                this.regionInstances[regionKey][materialKey].setMatrixAt(instanceIndex, matrix); this.regionCounts[regionKey][materialKey]++;
+                                const key = `${x},${z}`; if (!this.blockMap.has(key)) this.blockMap.set(key, []);
+                                this.blockMap.get(key).push({ regionKey, instanceIndex, blockType, y, currentState: 'unknown' });
+                            }
+                        }
+                    }
+                }
+                for (const [regionKey, regionInstances] of Object.entries(this.regionInstances)) {
+                    for (const [materialKey, instanceMesh] of Object.entries(regionInstances)) {
+                        instanceMesh.count = this.regionCounts[regionKey][materialKey]; instanceMesh.instanceMatrix.needsUpdate = true;
+                    }
+                }
+                
+                // Initialize lastKnownMap3D for fog of war - all blocks start as unknown
+                this.lastKnownMap3D = Array(chunkSize).fill(null).map(() => Array(chunkSize).fill(C.UNKNOWN));
+                
+                // Build 3D walkability cache for performance
+                this.buildWalkabilityCache(chunkSize, this.simParams.heightScale);
+                
+                if (!this.start3D) {
+                    this.updateStats("ERROR: No valid start position found!", 0, 0); document.getElementById('startButton').disabled = true; return;
+                }
+                
+                this.camera.position.set(0, chunkSize, chunkSize/2); this.camera.lookAt(0, 0, 0);
+                this.overheadCameraPos = { position: this.camera.position.clone(), target: new THREE.Vector3(0, 0, 0) };
+                if (this.isFirstPerson) { document.getElementById('firstPersonCheckbox').checked = false; this.toggleFirstPerson(false); }
+                this.updateStats("3D World generated. Ready to explore.", 0, 0); document.getElementById('startButton').disabled = false;
+            }
+            generateHeightMap(size, heightScale, noiseScale) {
+                const heightMap = [];
+                for (let z = 0; z < size; z++) {
+                    heightMap[z] = [];
+                    for (let x = 0; x < size; x++) {
+                        let h = noise(x, z, noiseScale); h += noise(x * 0.1, z * 0.1, noiseScale) * 0.3; h += noise(x * 0.01, z * 0.01, noiseScale) * 2;
+                        h = (h + 1) * 0.5; heightMap[z][x] = Math.max(1, Math.floor(h * heightScale));
+                    }
+                } return heightMap;
+            }
+            getBlockType(y, surfaceHeight, seaLevel, heightScale) {
+                if (y > surfaceHeight) return BlockType.AIR;
+                if (y <= seaLevel && y >= surfaceHeight - 1) return BlockType.WATER;
+                if (y === surfaceHeight) { if (surfaceHeight > heightScale * 0.8) return BlockType.SNOW; if (surfaceHeight <= seaLevel + 1) return BlockType.SAND; return BlockType.GRASS; }
+                if (y >= surfaceHeight - 3) return BlockType.DIRT;
+                return BlockType.STONE;
+            }
+            
+            buildWalkabilityCache(size, heightScale) {
+                this.walkabilityCache = new Set();
+                console.log('Building 3D walkability cache...');
+                
+                // Pre-compute walkability for all 3D positions
+                const walkablePositions = [];
+                
+                for (let x = 0; x < size; x++) {
+                    for (let z = 0; z < size; z++) {
+                        for (let y = 0; y <= heightScale + 10; y++) {
+                            // Convert to algorithm coordinates
+                            const algX = x - Math.floor(size / 2);
+                            const algZ = z - Math.floor(size / 2);
+                            
+                            // Check if there's a solid block at this position
+                            const key = `${x},${z}`;
+                            const blocks = this.blockMap.get(key) || [];
+                            const hasBlockAtY = blocks.some(block => block.y === y && block.blockType !== BlockType.AIR);
+                            
+                            if (hasBlockAtY) continue; // Solid block, not walkable
+                            
+                            // Check if there's solid ground below (y-1)
+                            const hasGroundBelow = blocks.some(block => block.y === y - 1 && block.blockType !== BlockType.AIR && block.blockType !== BlockType.WATER);
+                            
+                            // Check clearance above (y+1)
+                            const hasClearanceAbove = !blocks.some(block => block.y === y + 1 && block.blockType !== BlockType.AIR);
+                            
+                            if (hasGroundBelow && hasClearanceAbove) {
+                                this.walkabilityCache.add(`${algX},${y},${algZ}`);
+                                walkablePositions.push({ x: algX, y: y, z: algZ });
+                            }
+                        }
+                    }
+                }
+                
+                // Set a random starting position from walkable positions
+                if (walkablePositions.length > 0) {
+                    this.start3D = walkablePositions[Math.floor(Math.random() * walkablePositions.length)];
+                }
+                
+                console.log(`Built 3D walkability cache with ${this.walkabilityCache.size} walkable positions`);
+            }
+            
+            // Removed - no longer needed, we use pure 3D structures
+            
+            // Convert 3D knowledge map to 2D for fog-of-war visualization
+            convert3DKnownMapTo2D(knownMap3D, size) {
+                const kMap2D = Array(size).fill(null).map(() => Array(size).fill(C.UNKNOWN));
+                
+                // Project 3D knowledge onto 2D ground plane for visualization
+                for (let z = 0; z < size; z++) {
+                    for (let x = 0; x < size; x++) {
+                        // Convert to algorithm coordinates
+                        const algX = x - Math.floor(size / 2);
+                        const algZ = z - Math.floor(size / 2);
+                        
+                        // Check if any Y level at this X,Z position is known
+                        let hasKnownLevel = false;
+                        if (knownMap3D[algX]) {
+                            for (let y = 0; y <= this.simParams.heightScale + 10; y++) {
+                                if (knownMap3D[algX][y] && knownMap3D[algX][y][algZ] !== undefined) {
+                                    hasKnownLevel = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (hasKnownLevel) {
+                            // Check if this position has any walkable level
+                            let hasWalkableLevel = false;
+                            for (let y = 0; y <= this.simParams.heightScale + 10; y++) {
+                                if (this.walkabilityCache.has(`${algX},${y},${algZ}`)) {
+                                    hasWalkableLevel = true;
+                                    break;
+                                }
+                            }
+                            kMap2D[z][x] = hasWalkableLevel ? C.WALKABLE : C.WALL;
+                        }
+                    }
+                }
+                
+                return kMap2D;
+            }
+            
+            updateBlockVisibility(kMap, size) {
+                if (!this.lastKnownMap3D) {
+                    this.lastKnownMap3D = Array(size).fill(null).map(() => Array(size).fill(C.UNKNOWN));
+                    this.rebuildAllRegions(kMap, size); return;
+                }
+                const regionSize = 16; const changedRegions = new Set();
+                for (let z = 0; z < size; z++) { for (let x = 0; x < size; x++) { if (kMap[z][x] !== this.lastKnownMap3D[z][x]) { const regionRow = Math.floor(z / regionSize); const regionCol = Math.floor(x / regionSize); changedRegions.add(`${regionRow},${regionCol}`); } } }
+                for (const regionKey of changedRegions) { this.rebuildRegion(regionKey, kMap, size); }
+                for (let z = 0; z < size; z++) { for (let x = 0; x < size; x++) { this.lastKnownMap3D[z][x] = kMap[z][x]; } }
+            }
+            rebuildAllRegions(kMap, size) {
+                const regionSize = 16; const regionsPerSide = Math.ceil(size / regionSize);
+                for (let regionRow = 0; regionRow < regionsPerSide; regionRow++) { for (let regionCol = 0; regionCol < regionsPerSide; regionCol++) { this.rebuildRegion(`${regionRow},${regionCol}`, kMap, size); } }
+            }
+            rebuildRegion(regionKey, kMap, size) {
+                const regionSize = 16; const [regionRow, regionCol] = regionKey.split(',').map(Number); const matrix = new THREE.Matrix4();
+                for (const materialKey of Object.keys(this.regionCounts[regionKey])) { this.regionCounts[regionKey][materialKey] = 0; }
+                const startZ = regionRow * regionSize; const endZ = Math.min(startZ + regionSize, size);
+                const startX = regionCol * regionSize; const endX = Math.min(startX + regionSize, size);
+                
+                // Rebuild region based on 3D knowledge
+                for (let z = startZ; z < endZ; z++) {
+                    for (let x = startX; x < endX; x++) {
+                        const blocks = this.blockMap.get(`${x},${z}`);
+                        if (blocks) {
+                            const isUnknown = kMap[z][x] === C.UNKNOWN;
+                            const materialSuffix = isUnknown ? '_unknown' : '_original';
+                            for (const block of blocks) {
+                                if (block.regionKey === regionKey) {
+                                    matrix.makeTranslation(x - size / 2, block.y, z - size / 2);
+                                    const materialKey = `${block.blockType}${materialSuffix}`;
+                                    const instanceIndex = this.regionCounts[regionKey][materialKey];
+                                    this.regionInstances[regionKey][materialKey].setMatrixAt(instanceIndex, matrix);
+                                    this.regionCounts[regionKey][materialKey]++;
+                                    block.currentState = isUnknown ? 'unknown' : 'original';
+                                }
+                            }
+                        }
+                    }
+                }
+                for (const [materialKey, instanceMesh] of Object.entries(this.regionInstances[regionKey])) { instanceMesh.count = this.regionCounts[regionKey][materialKey]; instanceMesh.instanceMatrix.needsUpdate = true; }
+            }
+            
+            // Feature 5: On-Demand Visualization Updates - Direct block updates from newCells
+            updateVisualizationFromNewCells(newCells, size) {
+                const matrix = new THREE.Matrix4();
+                const regionSize = 16;
+                
+                // Process each newly discovered cell - they transition from unknown to known
+                for (const newCell of newCells) {
+                    const { x, y, z, newState } = newCell;
+                    
+                    // Convert to world coordinates
+                    const worldX = x + Math.floor(size / 2);
+                    const worldZ = z + Math.floor(size / 2);
+                    
+                    // Skip if out of bounds
+                    if (worldX < 0 || worldX >= size || worldZ < 0 || worldZ >= size) continue;
+                    
+                    // Get blocks at this position
+                    const blocks = this.blockMap.get(`${worldX},${worldZ}`) || [];
+                    
+                    // All newly discovered cells should become visible (unknown -> original)
+                    for (const block of blocks) {
+                        if (block.currentState === 'unknown') {
+                            const regionKey = block.regionKey;
+                            
+                            // Remove from unknown instances
+                            const unknownKey = `${block.blockType}_unknown`;
+                            if (this.regionInstances[regionKey] && this.regionInstances[regionKey][unknownKey]) {
+                                this.regionCounts[regionKey][unknownKey] = Math.max(0, this.regionCounts[regionKey][unknownKey] - 1);
+                                this.regionInstances[regionKey][unknownKey].count = this.regionCounts[regionKey][unknownKey];
+                                this.regionInstances[regionKey][unknownKey].instanceMatrix.needsUpdate = true;
+                            }
+                            
+                            // Add to original instances
+                            const originalKey = `${block.blockType}_original`;
+                            if (this.regionInstances[regionKey] && this.regionInstances[regionKey][originalKey]) {
+                                matrix.makeTranslation(worldX - size / 2, block.y, worldZ - size / 2);
+                                const instanceIndex = this.regionCounts[regionKey][originalKey];
+                                this.regionInstances[regionKey][originalKey].setMatrixAt(instanceIndex, matrix);
+                                this.regionCounts[regionKey][originalKey]++;
+                                this.regionInstances[regionKey][originalKey].count = this.regionCounts[regionKey][originalKey];
+                                this.regionInstances[regionKey][originalKey].instanceMatrix.needsUpdate = true;
+                            }
+                            
+                            // Update block state
+                            block.currentState = 'original';
+                        }
+                    }
+                }
+            }
+            
+            stopExploration() { if (!this.isRunning) return; this.shouldCancel = true; }
+            updateExplorationVisuals(progress) {
+                if (!progress || progress.type === 'check_cancel') return;
+                // DESTRUCTURE with new, more descriptive names from the refactored state
+                const { robotPosition, robotDirection, kMap, knownMap3D, fronts, currentTarget, explorationPath, coverage, iteration, currPath, newCells } = progress;
+                // Maintain compatibility for older properties for safety, though they should be deprecated
+                const { rPos = robotPosition, rDir = robotDirection, currT = currentTarget, expPos = explorationPath, iter = iteration } = progress;
+                const size = this.simParams.chunkSize;
+                this.lastCoverage = coverage; this.lastIter = iter;
+                this.updateStats(this.isRunning ? "Exploring 3D..." : "Done", coverage, iter);
+                
+                // Feature 5: On-Demand Visualization Updates - Direct block updates only
+                if (newCells && newCells.length > 0) {
+                    this.updateVisualizationFromNewCells(newCells, size);
+                } else if (newCells === undefined) {
+                    throw new Error("Feature 5: newCells data is required for visualization updates. The exploration system must provide newCells data.");
+                }
+                
+                // Update robot position in 3D space
+                if (rPos) {
+                    const robotX = rPos.x || 0;
+                    const robotY = rPos.y || 0;
+                    const robotZ = rPos.z || 0;
+                    
+                    this.robotMesh.position.set(robotX, robotY + 0.6, robotZ);
+                    const dirAngles = [0, Math.PI/4, Math.PI/2, 3*Math.PI/4, Math.PI, -3*Math.PI/4, -Math.PI/2, -Math.PI/4];
+                    this.robotMesh.rotation.y = dirAngles[rDir || 0]; 
+                    this.robotMesh.visible = true;
+                    if (this.isFirstPerson) { this.setCameraToRobotView(); }
+                }
+                
+                // Update 3D exploration trail
+                if (expPos && expPos.length > 1) { 
+                    const points = expPos.map(p => new THREE.Vector3(p.x || 0, (p.y || 0) + 0.2, p.z || 0)); 
+                    this.trailLine.geometry.setFromPoints(points); 
+                }
+                
+                // Update 3D current path
+                if (currPath && currPath.length > 1) { 
+                    const points = currPath.map(p => new THREE.Vector3(p.x || 0, (p.y || 0) + 0.3, p.z || 0)); 
+                    this.pathLine.geometry.setFromPoints(points); 
+                    this.pathLine.visible = true; 
+                } else { 
+                    this.pathLine.visible = false; 
+                }
+                
+                // Update 3D frontier visualization
+                if (fronts && fronts.length > 0) {
+                    const matrix = new THREE.Matrix4(); let count = 0;
+                    for (const f of fronts) {
+                        if (count >= 2048) break;
+                        matrix.makeTranslation(f.x || 0, (f.y || 0) + 0.5, f.z || 0); 
+                        this.frontierMesh.setMatrixAt(count++, matrix);
+                    }
+                    this.frontierMesh.count = count; this.frontierMesh.instanceMatrix.needsUpdate = true;
+                } else { this.frontierMesh.count = 0; }
+                
+                // Update 3D target marker
+                if (currT) {
+                    this.targetMarker.position.set(currT.x || 0, (currT.y || 0) + 0.2, currT.z || 0); 
+                    this.targetMarker.visible = true;
+                } else { this.targetMarker.visible = false; }
+            }
+            updateStats(status, coverage, iter) {
+                const statsDiv = document.getElementById('stats');
+                const coverageStr = (coverage !== undefined) ? coverage.toFixed(2) : '0.00';
+                const iterStr = (iter !== undefined) ? iter : '0';
+                statsDiv.innerHTML = `Status: ${status}<br>Coverage: ${coverageStr}%<br>Iterations: ${iterStr}`;
+            }
+            animate() { requestAnimationFrame(this.animate); this.controls.update(); this.renderer.render(this.scene, this.camera); }
+        }
+
+        const app = new MinecraftExplorerApp();
+        app.run();
+
+    </script>
+</body>
+</html>
